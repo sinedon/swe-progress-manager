@@ -4,7 +4,7 @@ import com.swe.project.progressmanager.dto.ClickRequest;
 import com.swe.project.progressmanager.service.ProgressService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import com.swe.project.progressmanager.client.ContentAccessClient;
+import com.swe.project.progressmanager.client.ContentManagerClient;
 
 @RestController
 @RequestMapping("/progress")
