@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.swe.project.progressmanager.client.CompletionEngineClient;
 import com.swe.project.progressmanager.client.ContentManagerClient;
 import com.swe.project.progressmanager.client.ProgressAccessClient;
+import com.swe.project.progressmanager.dto.CompletionRequest;
 import com.swe.project.progressmanager.dto.CompletionResponse;
 
 import java.util.Set;
@@ -24,9 +25,19 @@ public class ProgressService {
     private final ProgressAccessClient progressClient;
     private final CompletionEngineClient completionClient;
 
+    // For parsing JSON responses from other services
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    //Only used for testing, get it from contentClient in real
+    // constructor
+    public ProgressService(ContentManagerClient contentClient,
+                       ProgressAccessClient progressClient,
+                       CompletionEngineClient completionClient) {
+        this.contentClient = contentClient;
+        this.progressClient = progressClient;
+        this.completionClient = completionClient;
+    }
+
+    // Helper methods to interact with other services
     public Set<String> getTopicLabels(String topicId) {
         ResponseEntity<String> response = contentClient.getTopic(topicId);
         // Parse the response and extract labels
@@ -50,29 +61,43 @@ public class ProgressService {
             e.printStackTrace();
             return Set.of(); // Return empty set on error
         }
-
     }
-    
-    //Only used for testing, get from progressClient in real
+
     public Set<String> getClickedLabels(String learnerId, String topicId) {
-        return Set.of("1"); 
+        ResponseEntity<String> response = progressClient.getProgress(learnerId);
+        // Parse the response and extract clicked labels for the topic
+        Set<String> clickedLabels = Set.of();
+        try {
+            JsonNode root = objectMapper.readTree(response.getBody());
+            for (JsonNode topicProgress : root) {
+                if (topicId.equals(topicProgress.path("topicId").asText()) 
+                    && learnerId.equals(topicProgress.path("learnerId").asText())) {
+                    clickedLabels.add(topicProgress.path("label").asText());
+                }
+            }
+            return clickedLabels;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return Set.of(); // Return empty set on error
+        }
     }
 
-    public ProgressService(ContentManagerClient contentClient,
-                       ProgressAccessClient progressClient,
-                       CompletionEngineClient completionClient) {
-        this.contentClient = contentClient;
-        this.progressClient = progressClient;
-        this.completionClient = completionClient;
+    public CompletionRequest buildCompletionRequest(String learnerId, String topicId) {
+        Set<String> allLabels = getTopicLabels(topicId);
+        Set<String> clickedLabels = getClickedLabels(learnerId, topicId);
+        return new CompletionRequest(allLabels, clickedLabels);
+    }
+
+    public CompletionResponse checkCompletion(CompletionRequest request) {
+        return completionClient.checkCompletion(request.getAllLabels(), request.getClickedLabels());
     }
 
     public void recordClick(String learnerId, String topicId, String label) {
         System.out.println("Calling ProgressAccess...");
         progressClient.recordClick(learnerId, topicId, label);
-        Set<String> allLabels = getTopicLabels(topicId);
-        Set<String> clickedLabels = getClickedLabels(learnerId, topicId);
+        CompletionRequest request = buildCompletionRequest(learnerId, topicId);
         System.out.println("Calling CompletionEngine...");
-        CompletionResponse result = completionClient.checkCompletion(allLabels, clickedLabels);
+        CompletionResponse result = checkCompletion(request);
         System.out.println("Completion result: " + result);
 
         if ("COMPLETE".equals(result.getStatus())) {
@@ -85,7 +110,7 @@ public class ProgressService {
         }
     }
 
-    public Object getProgress(String learnerId) {
+    public ResponseEntity<?> getProgress(String learnerId) {
         return progressClient.getProgress(learnerId);
     }
 }

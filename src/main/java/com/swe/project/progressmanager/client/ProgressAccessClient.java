@@ -36,17 +36,15 @@ public class ProgressAccessClient {
         );
     }
 
-    public Object getProgress(String learnerId) {
+    public ResponseEntity<String> getProgress(String learnerId) {
         String url = progressAccessUrl + "/progress/" + learnerId;
-
-        ResponseEntity<Object> response = restTemplate.exchange(
+        ResponseEntity<String> response = restTemplate.exchange(
             url,
             HttpMethod.GET,
             null,
-            Object.class
+            String.class
         );
-
-        return response.getBody();
+        return response;
     }
 
 }
