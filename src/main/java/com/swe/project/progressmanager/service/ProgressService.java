@@ -7,11 +7,15 @@ import com.swe.project.progressmanager.client.ContentManagerClient;
 import com.swe.project.progressmanager.client.ProgressAccessClient;
 import com.swe.project.progressmanager.dto.CompletionRequest;
 import com.swe.project.progressmanager.dto.CompletionResponse;
+import com.swe.project.progressmanager.dto.TopicCompletedEvent;
+
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -20,6 +24,9 @@ public class ProgressService {
 
     @Autowired
     private RabbitTemplate rabbitTemplate;
+
+    @Value("${rabbitmq.progress.updated.queue:progress-updated}")
+    private String queue;
 
     private final ContentManagerClient contentClient;
     private final ProgressAccessClient progressClient;
@@ -111,11 +118,14 @@ public class ProgressService {
         CompletionResponse result = checkCompletion(request);
 
         if ("COMPLETE".equals(result.getStatus())) {
-            rabbitTemplate.convertAndSend(
-                    "topic-completed-exchange",
-                    "completed.test",
-                    "TOPIC_COMPLETED"
+            TopicCompletedEvent event = new TopicCompletedEvent(
+                learnerId,
+                topicId,
+                request.getClickedLabels().size(),
+                request.getAllLabels().size(),
+                LocalDateTime.now()
             );
+            rabbitTemplate.convertAndSend(queue, event);
         }
     }
 
