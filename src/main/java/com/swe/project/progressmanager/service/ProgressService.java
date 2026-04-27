@@ -7,8 +7,8 @@ import com.swe.project.progressmanager.client.ContentManagerClient;
 import com.swe.project.progressmanager.client.ProgressAccessClient;
 import com.swe.project.progressmanager.dto.CompletionRequest;
 import com.swe.project.progressmanager.dto.CompletionResponse;
+import com.swe.project.progressmanager.dto.ProgressUpdatedEvent;
 import com.swe.project.progressmanager.dto.TopicCompletedEvent;
-
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,8 +16,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 public class ProgressService {
@@ -33,6 +35,10 @@ public class ProgressService {
     private final CompletionEngineClient completionClient;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final AtomicReference<ProgressUpdatedEvent> latestProgressUpdatedEvent = new AtomicReference<>();
+    private final Map<String, Set<String>> completedTopicIdsByLearner = new ConcurrentHashMap<>();
+    private final Map<String, Integer> totalHotspotClicksByLearner = new ConcurrentHashMap<>();
+    private final Map<String, String> lastCompletedTopicIdByLearner = new ConcurrentHashMap<>();
 
     public ProgressService(ContentManagerClient contentClient,
                            ProgressAccessClient progressClient,
@@ -44,7 +50,7 @@ public class ProgressService {
 
     public Set<String> getTopicLabels(String topicId) {
         ResponseEntity<String> response = contentClient.getTopic(topicId);
-        Set<String> labels = new HashSet<>();
+        Set<String> labels = ConcurrentHashMap.newKeySet();
 
         try {
             JsonNode root = objectMapper.readTree(response.getBody());
@@ -71,7 +77,7 @@ public class ProgressService {
 
     public Set<String> getClickedLabels(String learnerId, String topicId) {
         ResponseEntity<String> response = progressClient.getProgress(learnerId);
-        Set<String> clickedLabels = new HashSet<>();
+        Set<String> clickedLabels = ConcurrentHashMap.newKeySet();
 
         try {
             JsonNode root = objectMapper.readTree(response.getBody());
@@ -114,19 +120,35 @@ public class ProgressService {
     public void recordClick(String learnerId, String topicId, String label) {
         progressClient.recordClick(learnerId, topicId, label);
 
+        totalHotspotClicksByLearner.merge(learnerId, 1, Integer::sum);
+
         CompletionRequest request = buildCompletionRequest(learnerId, topicId);
         CompletionResponse result = checkCompletion(request);
+        boolean isComplete = "COMPLETE".equals(result.getStatus());
 
-        if ("COMPLETE".equals(result.getStatus())) {
-            TopicCompletedEvent event = new TopicCompletedEvent(
-                learnerId,
-                topicId,
-                request.getClickedLabels().size(),
-                request.getAllLabels().size(),
-                LocalDateTime.now()
+        if (isComplete) {
+            Set<String> completedTopics = completedTopicIdsByLearner.computeIfAbsent(
+                    learnerId,
+                    key -> ConcurrentHashMap.newKeySet()
             );
-            rabbitTemplate.convertAndSend(queue, event);
+
+            boolean firstTimeCompleted = completedTopics.add(topicId);
+            lastCompletedTopicIdByLearner.put(learnerId, topicId);
+
+            if (firstTimeCompleted) {
+                TopicCompletedEvent event = new TopicCompletedEvent(
+                        learnerId,
+                        topicId,
+                        request.getClickedLabels().size(),
+                        request.getAllLabels().size(),
+                        LocalDateTime.now()
+                );
+
+                rabbitTemplate.convertAndSend(queue, event);
+            }
         }
+
+        updateLatestProgressUpdatedEvent(learnerId);
     }
 
     public ResponseEntity<?> getProgress(String learnerId) {
@@ -138,6 +160,73 @@ public class ProgressService {
     }
 
     public ResponseEntity<?> undoLatestClick(String learnerId, String topicId) {
-        return progressClient.undoLatestClick(learnerId, topicId);
+        ResponseEntity<?> response = progressClient.undoLatestClick(learnerId, topicId);
+
+        if (response.getStatusCode().is2xxSuccessful()) {
+            totalHotspotClicksByLearner.compute(learnerId, (key, value) -> {
+                if (value == null || value <= 0) {
+                    return 0;
+                }
+
+                return value - 1;
+            });
+
+            try {
+                CompletionRequest request = buildCompletionRequest(learnerId, topicId);
+                CompletionResponse result = checkCompletion(request);
+
+                if (!"COMPLETE".equals(result.getStatus())) {
+                    Set<String> completedTopics = completedTopicIdsByLearner.get(learnerId);
+
+                    if (completedTopics != null) {
+                        completedTopics.remove(topicId);
+                    }
+                }
+            } catch (Exception ignored) {
+                // The persisted undo still succeeded. Keep the UI event best-effort.
+            }
+
+            updateLatestProgressUpdatedEvent(learnerId);
+        }
+
+        return response;
+    }
+
+    public ProgressUpdatedEvent getLatestProgressUpdatedEvent(String learnerId) {
+        ProgressUpdatedEvent latest = latestProgressUpdatedEvent.get();
+
+        if (latest != null && learnerId.equals(latest.getLearnerId())) {
+            return latest;
+        }
+
+        return buildProgressUpdatedEvent(learnerId);
+    }
+
+    public ProgressUpdatedEvent getLatestProgressUpdatedEvent() {
+        ProgressUpdatedEvent latest = latestProgressUpdatedEvent.get();
+
+        if (latest != null) {
+            return latest;
+        }
+
+        return new ProgressUpdatedEvent(null, 0, 0, null, LocalDateTime.now());
+    }
+
+    private void updateLatestProgressUpdatedEvent(String learnerId) {
+        latestProgressUpdatedEvent.set(buildProgressUpdatedEvent(learnerId));
+    }
+
+    private ProgressUpdatedEvent buildProgressUpdatedEvent(String learnerId) {
+        Set<String> completedTopics = completedTopicIdsByLearner.getOrDefault(learnerId, Set.of());
+        int totalHotspotClicks = totalHotspotClicksByLearner.getOrDefault(learnerId, 0);
+        String lastCompletedTopicId = lastCompletedTopicIdByLearner.get(learnerId);
+
+        return new ProgressUpdatedEvent(
+                learnerId,
+                completedTopics.size(),
+                totalHotspotClicks,
+                lastCompletedTopicId,
+                LocalDateTime.now()
+        );
     }
 }
