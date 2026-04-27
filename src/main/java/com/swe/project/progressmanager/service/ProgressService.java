@@ -25,7 +25,7 @@ public class ProgressService {
     @Autowired
     private RabbitTemplate rabbitTemplate;
 
-    @Value("${rabbitmq.progress.updated.queue:progress-updated}")
+    @Value("${rabbitmq.progress.completed.queue:topic.completed.queue}")
     private String queue;
 
     private final ContentManagerClient contentClient;
